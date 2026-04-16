@@ -1,0 +1,105 @@
+name: Claude Issue Handler
+
+on:
+  workflow_call:
+    inputs:
+      checkout_ref:
+        description: "Branch to checkout (main, gh-pages, etc.)"
+        required: false
+        type: string
+        default: "main"
+      claude_prompt:
+        description: "Domain-specific prompt for Claude CLI"
+        required: true
+        type: string
+      success_comment:
+        description: "Comment to post on success"
+        required: false
+        type: string
+        default: "反映完了 ✅"
+      no_changes_comment:
+        description: "Comment when no changes detected"
+        required: false
+        type: string
+        default: "変更対象が見つかりませんでした。指示内容を確認してください。"
+      timeout_minutes:
+        description: "Job timeout in minutes"
+        required: false
+        type: number
+        default: 10
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: true
+
+jobs:
+  update:
+    if: contains(github.event.issue.labels.*.name, 'update')
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    permissions:
+      contents: write
+      issues: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.checkout_ref }}
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Apply update
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          claude -p --dangerously-skip-permissions "
+          ${{ inputs.claude_prompt }}
+
+          ## Issue
+          タイトル: ${ISSUE_TITLE}
+          本文:
+          ${ISSUE_BODY}
+
+          編集が終わったら変更内容のサマリを出力してください。
+          "
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet; then
+            echo "NO_CHANGES=true" >> $GITHUB_ENV
+          else
+            git add -A
+            git commit -m "update: ${{ github.event.issue.title }}
+
+          Triggered by #${{ github.event.issue.number }}
+          Co-Authored-By: Claude Code <noreply@anthropic.com>"
+            git push
+            echo "NO_CHANGES=false" >> $GITHUB_ENV
+          fi
+
+      - name: Comment and close
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const noChanges = process.env.NO_CHANGES === 'true';
+            const body = noChanges
+              ? `${{ inputs.no_changes_comment }}`
+              : `${{ inputs.success_comment }}`;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body
+            });
+            if (!noChanges) {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                state: 'closed'
+              });
+            }
